@@ -1,160 +1,252 @@
-#include <esp_camera.h>
 #include <WiFi.h>
+#include <FS.h>
+#include <SD_MMC.h>
+#include <esp-fs-webserver.h> // https://github.com/cotestatnt/esp-fs-webserver
 
-//
-// WARNING!!! PSRAM IC required for UXGA resolution and high JPEG quality
-//            Ensure ESP32 Wrover Module or other board with PSRAM is selected
-//            Partial images will be transmitted if image exceeds buffer size
-//
-//            You must select partition scheme from the board menu that has at least 3MB APP space.
-//            Face Recognition is DISABLED for ESP32 and ESP32-S2, because it takes up from 15 
-//            seconds to process single frame. Face Detection is ENABLED if PSRAM is enabled as well
+#include "esp_camera.h"
+#include "soc/soc.h"          // Brownout error fix
+#include "soc/rtc_cntl_reg.h" // Brownout error fix
 
-// ===================
-// Select camera model
-// ===================
-//#define CAMERA_MODEL_WROVER_KIT // Has PSRAM
-//#define CAMERA_MODEL_ESP_EYE // Has PSRAM
-//#define CAMERA_MODEL_ESP32S3_EYE // Has PSRAM
-//#define CAMERA_MODEL_M5STACK_PSRAM // Has PSRAM
-//#define CAMERA_MODEL_M5STACK_V2_PSRAM // M5Camera version B Has PSRAM
-//#define CAMERA_MODEL_M5STACK_WIDE // Has PSRAM
-//#define CAMERA_MODEL_M5STACK_ESP32CAM // No PSRAM
-//#define CAMERA_MODEL_M5STACK_UNITCAM // No PSRAM
-#define CAMERA_MODEL_AI_THINKER // Has PSRAM
-//#define CAMERA_MODEL_TTGO_T_JOURNAL // No PSRAM
-//#define CAMERA_MODEL_XIAO_ESP32S3 // Has PSRAM
-// ** Espressif Internal Boards **
-//#define CAMERA_MODEL_ESP32_CAM_BOARD
-//#define CAMERA_MODEL_ESP32S2_CAM_BOARD
-//#define CAMERA_MODEL_ESP32S3_CAM_LCD
-//#define CAMERA_MODEL_DFRobot_FireBeetle2_ESP32S3 // Has PSRAM
-//#define CAMERA_MODEL_DFRobot_Romeo_ESP32S3 // Has PSRAM
+// Local include files
 #include "camera_pins.h"
-#include <git_revision.h>
+//SD_MMC
+int clk = 14;
+int cmd = 15;
+int d0  = 2;
+int d1  = 4;
+int d2  = 12;
+int d3  = 13;
 
-// ===========================
-// Enter your WiFi credentials
-// ===========================
-const char* ssid = "Wind3 HUB-41F5AF";
-const char* password = "0r5824wjagi8s04p";
+FSWebServer myWebServer(SD_MMC, 80);
 
-void startCameraServer();
-void setupLedFlash(int pin);
+uint16_t grabInterval = 0;  // Grab a picture every x seconds
+uint32_t lastGrabTime = 0;
 
-void setup() {
+// Timezone definition to get properly time from NTP server
+#define MYTZ "CET-1CEST,M3.5.0,M10.5.0/3"
+
+// Struct for saving time datas (needed for time-naming the image files)
+struct tm tInfo;
+
+// Functions prototype
+void listDir(const char *dirname, uint8_t levels);
+void setLamp(int);
+void setInterval();
+
+// Grab a picture from CAM and store on SD or in flash
+void getPicture();
+const char* getFolder = "/img";
+
+/*
+* Getting FS info (total and free bytes) is strictly related to
+* filesystem library used (LittleFS, FFat, SPIFFS etc etc) and ESP framework
+* ESP8266 FS implementation has methods for total and used bytes (only label is missing)
+*/
+
+void getFsInfo(fsInfo_t* fsInfo) {
+  fsInfo->fsName = "SD_MMC";
+}
+
+
+
+///////////////////////////////////  SETUP  ///////////////////////////////////////
+void setup()
+{
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // disable brownout detect
+
+  // Flash LED setup
+  
+
   Serial.begin(115200);
-  Serial.printf("Version: %s, Repo: %s\n", __GIT_COMMIT__, __GIT_REMOTE_URL__);
-  Serial.setDebugOutput(true);
   Serial.println();
 
-  camera_config_t config;
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = Y2_GPIO_NUM;
-  config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM;
-  config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM;
-  config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
-  config.pin_d7 = Y9_GPIO_NUM;
-  config.pin_xclk = XCLK_GPIO_NUM;
-  config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM;
-  config.pin_href = HREF_GPIO_NUM;
-  config.pin_sccb_sda = SIOD_GPIO_NUM;
-  config.pin_sccb_scl = SIOC_GPIO_NUM;
-  config.pin_pwdn = PWDN_GPIO_NUM;
-  config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_UXGA;
-  config.pixel_format = PIXFORMAT_JPEG; // for streaming
-  //config.pixel_format = PIXFORMAT_RGB565; // for face detection/recognition
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-  config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 12;
-  config.fb_count = 1;
-  
-  // if PSRAM IC present, init with UXGA resolution and higher JPEG quality
-  //                      for larger pre-allocated frame buffer.
-  if(config.pixel_format == PIXFORMAT_JPEG){
-    if(psramFound()){
-      config.jpeg_quality = 10;
-      config.fb_count = 2;
-      config.grab_mode = CAMERA_GRAB_LATEST;
-      Serial.println("PSRAM found. Using PSRAM frame buffer");
-    } else {
-      // Limit the frame size when PSRAM is not available
-      config.frame_size = FRAMESIZE_SVGA;
-      config.fb_location = CAMERA_FB_IN_DRAM;
-      Serial.println("PSRAM not found. Using DRAM frame buffer");
-    }
-  } else {
-    // Best option for face detection/recognition
-    Serial.println("Not using JPEG format");
-    config.frame_size = FRAMESIZE_240X240;
-#if CONFIG_IDF_TARGET_ESP32S3
-    config.fb_count = 2;
-#endif
+  /*
+   Init onboard SD filesystem (format if necessary)
+   SD_MMC.begin(const char * mountpoint, bool mode1bit, bool format_if_mount_failed, int sdmmc_frequency, uint8_t maxOpenFiles)
+   To avoid led glowindg, set mode1bit = true (SD HS_DATA1 is tied to GPIO4, the same of on-board flash led)
+  */
+  pinMode(clk, PULLUP);   // 14
+  pinMode(cmd, PULLUP);   // 15
+  pinMode(d0, PULLUP);  // 2
+  pinMode(d1, PULLUP);
+  pinMode(d2, PULLUP);
+  pinMode(d3, PULLUP);
+  if(! SD_MMC.setPins(clk, cmd, d0)){
+    Serial.println("Pin change failed!");
+    return;
+  }
+  if (!SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_HIGHSPEED, 5))
+  {
+    Serial.println("\nSD Mount Failed.\n");
   }
 
-#if defined(CAMERA_MODEL_ESP_EYE)
-  pinMode(13, INPUT_PULLUP);
-  pinMode(14, INPUT_PULLUP);
-#endif
+  pinMode(LAMP_PIN, OUTPUT);                      // set the lamp pin as output
+  ledcSetup(lampChannel, pwmfreq, pwmresolution); // configure LED PWM channel
+  setLamp(0);                                     // set default value
+  ledcAttachPin(LAMP_PIN, lampChannel);           // attach the GPIO pin to the channel
 
-  // camera init
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) {
-    Serial.printf("Camera init failed with error 0x%x", err);
+  if (!SD_MMC.exists(getFolder))
+  {
+    if(SD_MMC.mkdir(getFolder))
+      Serial.println("Dir created");
+    else
+      Serial.println("mkdir failed");
+  }
+  listDir(getFolder, 0);
+
+  // Try to connect to stored SSID, start AP if fails after timeout
+  myWebServer.setAP("ESP_AP", "123456789");
+  IPAddress myIP = myWebServer.startWiFi(15000);
+
+  // Add custom page handlers to webserver
+  myWebServer.on("/getPicture", getPicture);
+  myWebServer.on("/setInterval", setInterval);
+  
+  // set /setup and /edit page authentication
+  // myWebServer.setAuthentication("admin", "admin");
+
+  // Enable ACE FS file web editor and add FS info callback function
+  myWebServer.enableFsCodeEditor(getFsInfo);
+
+  // Start webserver
+  myWebServer.begin();
+  Serial.print(F("ESP Web Server started on IP Address: "));
+  Serial.println(myIP);
+  Serial.println(F("Open /setup page to configure optional parameters"));
+  Serial.println(F("Open /edit page to view and edit files"));
+  Serial.println(F("Open /update page to upload firmware and filesystem updates"));
+
+  // Sync time with NTP
+  configTzTime(MYTZ, "time.google.com", "time.windows.com", "pool.ntp.org");
+
+  // Init the camera module (accordind the camera_config_t defined)
+  init_camera();
+}
+
+///////////////////////////////////  LOOP  ///////////////////////////////////////
+void loop()
+{
+  myWebServer.run();
+  if (grabInterval) {
+    if (millis() - lastGrabTime > grabInterval *1000) {
+      lastGrabTime = millis();
+      getPicture();
+    }
+  }
+}
+
+//////////////////////////////////  FUNCTIONS//////////////////////////////////////
+
+void setInterval() {  
+  if(myWebServer.hasArg("val")) {
+    grabInterval = 0;
+    grabInterval = myWebServer.arg("val").toInt();
+    Serial.printf("Set grab interval every %d seconds\n", grabInterval);
+  }
+  myWebServer.send(200, "text/plain", "OK");
+}
+
+// Lamp Control
+void setLamp(int newVal)
+{
+  if (newVal != -1)
+  {
+    // Apply a logarithmic function to the scale.
+    int brightness = round((pow(2, (1 + (newVal * 0.02))) - 2) / 6 * pwmMax);
+    ledcWrite(lampChannel, brightness);
+    Serial.print("Lamp: ");
+    Serial.print(newVal);
+    Serial.print("%, pwm = ");
+    Serial.println(brightness);
+  }
+}
+
+// Send a picture taken from CAM to a Telegram chat
+void getPicture()
+{  
+
+  // Take Picture with Camera;
+  Serial.println("Camera capture requested");
+
+  // Take Picture with Camera and store in ram buffer fb
+  setLamp(100);
+  delay(100);
+  camera_fb_t *fb = esp_camera_fb_get();
+  setLamp(0);
+
+  if (!fb)
+  {
+    Serial.println("Camera capture failed");
+    myWebServer.send(500, "text/plain", "ERROR. Image grab failed");
     return;
   }
 
-  sensor_t * s = esp_camera_sensor_get();
-  // initial sensors are flipped vertically and colors are a bit saturated
-  if (s->id.PID == OV3660_PID) {
-    s->set_vflip(s, 1); // flip it back
-    s->set_brightness(s, 1); // up the brightness just a bit
-    s->set_saturation(s, -2); // lower the saturation
+  // Keep files on SD memory, filename is time based (YYYYMMDD_HHMMSS.jpg)
+  // Embedded filesystem is too small to keep all images, overwrite the same file
+  char filename[20];
+  time_t now = time(nullptr);
+  tInfo = *localtime(&now);
+  strftime(filename, sizeof(filename), "%Y%m%d_%H%M%S.jpg", &tInfo);
+
+  char filePath[30];
+  strcpy(filePath, getFolder);
+  strcat(filePath, "/");
+  strcat(filePath, filename);
+  File file = SD_MMC.open(filePath, "w");
+  if (!file)
+  {
+    Serial.println("Failed to open file in writing mode");
+      myWebServer.send(500, "text/plain", "ERROR. Image grab failed");
+    return;
   }
-  // drop down frame size for higher initial frame rate
-  if(config.pixel_format == PIXFORMAT_JPEG){
-    s->set_framesize(s, FRAMESIZE_QVGA);
-  }
+  // size_t _jpg_buf_len = 0;
+  // uint8_t *_jpg_buf = NULL;
+  // bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
 
-#if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)
-  s->set_vflip(s, 1);
-  s->set_hmirror(s, 1);
-#endif
+  file.write(fb->buf, fb->len);
+  file.close();
+  Serial.printf("Saved file to path: %s - %zu bytes\n", filePath, fb->len);
 
-#if defined(CAMERA_MODEL_ESP32S3_EYE)
-  s->set_vflip(s, 1);
-#endif
-
-// Setup LED FLash if LED pin is defined in camera_pins.h
-#if defined(LED_GPIO_NUM)
-  setupLedFlash(LED_GPIO_NUM);
-#endif
-
-  WiFi.begin(ssid, password);
-  WiFi.setSleep(false);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("");
-  Serial.println("WiFi connected");
-
-  startCameraServer();
-
-  Serial.print("Camera Ready! Use 'http://");
-  Serial.print(WiFi.localIP());
-  Serial.println("' to connect");
+  // Clear buffer
+  esp_camera_fb_return(fb);
+    myWebServer.send(200, "text/plain", filename);
 }
 
-void loop() {
-  // Do nothing. Everything is done in another task by the web server
-  delay(10000);
+// List all files saved in the selected filesystem
+void listDir(const char *dirname, uint8_t levels)
+{
+  uint32_t freeBytes = SD_MMC.totalBytes() - SD_MMC.usedBytes();
+  Serial.print("\nTotal space: ");
+  Serial.println(SD_MMC.totalBytes());
+  Serial.print("Free space: ");
+  Serial.println(freeBytes);
+
+  Serial.printf("Listing directory: %s\r\n", dirname);
+  File root = SD_MMC.open(dirname);
+  if (!root)
+  {
+    Serial.println("- failed to open directory\n");
+    return;
+  }
+  if (!root.isDirectory())
+  {
+    Serial.println(" - not a directory\n");
+    return;
+  }
+  File file = root.openNextFile();
+  while (file)
+  {
+    if (file.isDirectory())
+    {
+      Serial.printf("  DIR : %s\n", file.name());
+      if (levels)
+        listDir(file.name(), levels - 1);
+    }
+    else
+    {
+      Serial.printf("  FILE: %s\tSIZE: %d", file.name(), file.size());
+      Serial.println();
+    }
+    file = root.openNextFile();
+  }
 }
