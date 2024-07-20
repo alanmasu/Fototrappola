@@ -83,13 +83,16 @@ void setup() {
       config.jpeg_quality = 10;
       config.fb_count = 2;
       config.grab_mode = CAMERA_GRAB_LATEST;
+      Serial.println("PSRAM found. Using PSRAM frame buffer");
     } else {
       // Limit the frame size when PSRAM is not available
       config.frame_size = FRAMESIZE_SVGA;
       config.fb_location = CAMERA_FB_IN_DRAM;
+      Serial.println("PSRAM not found. Using DRAM frame buffer");
     }
   } else {
     // Best option for face detection/recognition
+    Serial.println("Not using JPEG format");
     config.frame_size = FRAMESIZE_240X240;
 #if CONFIG_IDF_TARGET_ESP32S3
     config.fb_count = 2;
