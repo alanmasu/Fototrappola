@@ -17,6 +17,8 @@ int d1  = 4;
 int d2  = 12;
 int d3  = 13;
 
+#include <git_revision.h>
+
 FSWebServer myWebServer(SD_MMC, 80);
 
 uint16_t grabInterval = 0;  // Grab a picture every x seconds
@@ -45,6 +47,8 @@ const char* getFolder = "/img";
 
 void getFsInfo(fsInfo_t* fsInfo) {
   fsInfo->fsName = "SD_MMC";
+  fsInfo->totalBytes = SD_MMC.totalBytes();
+  fsInfo->usedBytes = SD_MMC.usedBytes();
 }
 
 
@@ -59,6 +63,10 @@ void setup()
 
   Serial.begin(115200);
   Serial.println();
+
+  delay(3000);
+
+  Serial.printf("Commit hash: %s, Git repo: %s\n", __GIT_COMMIT__, __GIT_REMOTE_URL__);
 
   /*
    Init onboard SD filesystem (format if necessary)

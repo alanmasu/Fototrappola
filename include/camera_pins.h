@@ -281,8 +281,8 @@ static esp_err_t init_camera() {
       default: Serial.println("WARNING: Camera module is unknown and not properly supported, will fallback to OV2640 operation");
     }
     s->set_sharpness(s, 1);
-    s->set_vflip(s, 1);
-    //s->set_hmirror(s, 1);
+    // s->set_vflip(s, 1);
+    // s->set_hmirror(s, 1);
 
   }
   return ESP_OK;
